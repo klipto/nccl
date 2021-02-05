@@ -87,6 +87,7 @@ class ncclFunction<ncclFuncAllGather, NCCL_ALGO_RING, NCCL_PROTO_SIMPLE, FUNC, T
             prims.directSend(thisOutput + curSchedule * size, curSchedule * size, size);
           }
         }
+      } else {
         // minus 1 is needed to pass as a "sender" to ncclPrimitive 
         // TODO: saemal, can you fix ncclPrimitive to get rid of this issue?
         int m1 = -1;
