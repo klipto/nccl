@@ -22,7 +22,7 @@ class ncclFunction<ncclFuncAllGather, NCCL_ALGO_RING, NCCL_PROTO_SIMPLE, FUNC, T
       const int nChannels = args->coll.nChannels;
       struct ncclDevComm* comm = args->comm;
       const int nranks = comm->nRanks;
-      int channelId = bid / (nranks-1);
+      int channelId = bid / 15;
       struct ncclChannel* channel = comm->channels + channelId;
       struct ncclRing* ring = &channel->ring;
       const int stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE] / (sizeof(T)*NCCL_STEPS);
@@ -36,26 +36,68 @@ class ncclFunction<ncclFuncAllGather, NCCL_ALGO_RING, NCCL_PROTO_SIMPLE, FUNC, T
       // Compute pointers
       const T * __restrict__ thisInput = (const T*)args->sendbuff;
       T * __restrict__ thisOutput = (T*)args->recvbuff;
+     int conn[16][15] = {
+        1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+        0,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+        0,1,3,4,5,6,7,8,9,10,11,12,13,14,15,
+        0,1,2,4,5,6,7,8,9,10,11,12,13,14,15,
+        0,1,2,3,5,6,7,8,9,10,11,12,13,14,15,
+        0,1,2,3,4,6,7,8,9,10,11,12,13,14,15,
+        0,1,2,3,4,5,7,8,9,10,11,12,13,14,15,
+        0,1,2,3,4,5,6,8,9,10,11,12,13,14,15,
+        0,1,2,3,4,5,6,7,9,10,11,12,13,14,15,
+        0,1,2,3,4,5,6,7,8,10,11,12,13,14,15,
+        0,1,2,3,4,5,6,7,8,9,11,12,13,14,15,
+        0,1,2,3,4,5,6,7,8,9,10,12,13,14,15,
+        0,1,2,3,4,5,6,7,8,9,10,11,13,14,15,
+        0,1,2,3,4,5,6,7,8,9,10,11,12,14,15,
+        0,1,2,3,4,5,6,7,8,9,10,11,12,13,15,
+        0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
+      };
 
-      int sizePerChannel = size/nChannels;
-      int nghr = (bid % (nranks-1))+1;
       int ncclWorkIndex = args->index;
-
-
-      if (myRank == 0){
-	ncclPrimitives<UNROLL, 1, 1, T, 0, 1, 1, FUNC>
-	  prims(tid, nthreads, NULL, &nghr, thisOutput, stepSize, channel, comm, ncclShmem->ptrs, 0);
-	prims.directSend(thisOutput + channelId * sizePerChannel, channelId * sizePerChannel, sizePerChannel);
-      } else if (nghr == myRank) {
-        int nghr = 0;
-	int m1 = -1;
+      const int nsteps = 1;
+      // step x gpu x bid
+      int schedule[nsteps][16][30] = {
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+        1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+        2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,0,1,3,4,5,6,7,8,9,10,11,12,13,14,15,
+        3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,0,1,2,4,5,6,7,8,9,10,11,12,13,14,15,
+        4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,0,1,2,3,5,6,7,8,9,10,11,12,13,14,15,
+        5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,0,1,2,3,4,6,7,8,9,10,11,12,13,14,15,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,0,1,2,3,4,5,7,8,9,10,11,12,13,14,15,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,0,1,2,3,4,5,6,8,9,10,11,12,13,14,15,
+        8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,0,1,2,3,4,5,6,7,9,10,11,12,13,14,15,
+        9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,0,1,2,3,4,5,6,7,8,10,11,12,13,14,15,
+        10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,0,1,2,3,4,5,6,7,8,9,11,12,13,14,15,
+        11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,0,1,2,3,4,5,6,7,8,9,10,12,13,14,15,
+        12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,0,1,2,3,4,5,6,7,8,9,10,11,13,14,15,
+        13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,0,1,2,3,4,5,6,7,8,9,10,11,12,14,15,
+        14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,0,1,2,3,4,5,6,7,8,9,10,11,12,13,15,
+        15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
+      };
+      int blocksPerChannel = gridDim.x/nChannels;
+      int bidInChannel = bid % blocksPerChannel;
+      int nghr = conn[myRank][bidInChannel % (blocksPerChannel)];
         ncclPrimitives<UNROLL, 1, 1, T, 1, 1, 1, FUNC>
-            prims(tid, nthreads, &nghr, &m1, thisOutput, stepSize, channel, comm, ncclShmem->ptrs, 0);
-        prims.directRecv(thisOutput + channelId * sizePerChannel, channelId * sizePerChannel, sizePerChannel);
-      }
-
-      //cg::grid_group barrier = cg::this_grid();
-      //barrier.sync();
+            prims(tid, nthreads, &nghr, &nghr, thisOutput, stepSize, channel, comm, ncclShmem->ptrs, 0);
+        for (int step = 0; step < nsteps; step++){
+          int curSchedule = schedule[step][myRank][bidInChannel];
+          if (curSchedule != -1){
+            prims.directSend(thisOutput + curSchedule * size + bid/blocksPerChannel * size/nChannels, curSchedule * size + bid/blocksPerChannel * size/nChannels, size/nChannels);
+          }
+        }
+        // minus 1 is needed to pass as a "sender" to ncclPrimitive 
+        // TODO: saemal, can you fix ncclPrimitive to get rid of this issue?
+        int m1 = -1;
+        // ncclPrimitives<UNROLL, 1, 1, T, 1, 1, 1, FUNC>
+        //     prims(tid, nthreads, &nghr, &m1, thisOutput, stepSize, channel, comm, ncclShmem->ptrs, 0);
+        for (int step = 0; step < nsteps; step++){
+          int curSchedule = schedule[step][myRank][bidInChannel + blocksPerChannel];
+          if (curSchedule != -1){
+            prims.directRecv(thisOutput + curSchedule * size + bid/blocksPerChannel * size/nChannels, curSchedule * size + bid/blocksPerChannel * size/nChannels, size/nChannels);
+          }
+        }
     }
 };
 
