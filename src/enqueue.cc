@@ -68,15 +68,18 @@ static void* const ncclKerns[1+NCCL_NUM_FUNCTIONS*ncclNumOps*ncclNumTypes*NCCL_N
 /*       Launch system : synchronization and CUDA kernel launch              */
 /*****************************************************************************/
 
-ncclResult_t ncclLaunchCooperativeKernelMultiDevice(struct cudaLaunchParams *paramsList, int* cudaDevs, int numDevices, int cgMode) {
+ncclResult_t ncclLaunchCooperativeKernelMultiDevice(struct cudaLaunchParams *paramsList, int* cudaDevs, int numDevices, int cgMode, int numBlocksPerChannel) {
+  for (int i = 0; i < numDevices; i++) {
+    struct cudaLaunchParams* params = paramsList+i;
+    params->gridDim.x *= numBlocksPerChannel;
+  }
 #if CUDART_VERSION >= 9000
   if (cgMode & 0x01) {
     CUDACHECK(cudaLaunchCooperativeKernelMultiDevice(paramsList, numDevices,
             // These flags are to reduce the latency of using this API
             cudaCooperativeLaunchMultiDeviceNoPreSync|cudaCooperativeLaunchMultiDeviceNoPostSync));
-    return ncclSuccess;
   }
-#endif
+#else
   int savedDev;
   CUDACHECK(cudaGetDevice(&savedDev));
   for (int i = 0; i < numDevices; i++) {
@@ -85,6 +88,11 @@ ncclResult_t ncclLaunchCooperativeKernelMultiDevice(struct cudaLaunchParams *par
     CUDACHECK(cudaLaunchKernel(params->func, params->gridDim, params->blockDim, params->args, params->sharedMem, params->stream));
   }
   CUDACHECK(cudaSetDevice(savedDev));
+#endif
+  for (int i = 0; i < numDevices; i++) {
+    struct cudaLaunchParams* params = paramsList+i;
+    params->gridDim.x /= numBlocksPerChannel;
+  }
   return ncclSuccess;
 }
 
@@ -102,6 +110,11 @@ static ncclResult_t getNextOp(struct ncclChannel* channel, struct ncclWork** wor
   // Initialize with work elem if provided
   if (base) memcpy(e, base, sizeof(struct ncclWorkElem));
   e->active = 1;
+
+  // SCKL replicates active for other thread blocks
+  for (int i = 0; i < channel->numBlocksPerChannel-1; i++){
+    channel->activeBlocksPerChannel[i*NCCL_MAX_OPS + opIndex] = 1; 
+  }
   e->index = opIndex;
   channel->workFifoTail++;
   channel->workCount++;
@@ -126,21 +139,28 @@ static ncclResult_t setupLaunch(struct ncclComm* comm, struct cudaLaunchParams* 
       e->funcIndex = FUNC_INDEX_P2P;
       e->p2p.nThreads = 0;
     }
-    channel->workFifo[(channel->workFifoTail-1)%NCCL_MAX_OPS].elems[0].active = 2;
+    int channelTailIndex = ((channel->workFifoTail-1)%NCCL_MAX_OPS);
+    channel->workFifo[channelTailIndex].elems[0].active = 2;
+    for (int i = 0; i < channel->numBlocksPerChannel-1; i++){
+      channel->activeBlocksPerChannel[i*NCCL_MAX_OPS + channelTailIndex] = 2;
+    }
   }
 
   // Find the first operation, choose the kernel accordingly and pass it
   // as the first argument.
   struct ncclChannel* c0 = comm->channels;
-  struct ncclWork* work = c0->workFifo+((c0->workFifoTail-c0->workCount)%NCCL_MAX_OPS);
+  int c0Index = ((c0->workFifoTail-c0->workCount)%NCCL_MAX_OPS);
+  struct ncclWork* work = c0->workFifo+c0Index;
   struct ncclWorkElem* elem = work->elems;
   memcpy(&comm->args, elem, sizeof(struct ncclWorkElem));
   // As we inline the first coll directly, we can free it immediately.
-  if (elem->funcIndex != FUNC_INDEX_P2P) elem->active = 0;
-
+  if (elem->funcIndex != FUNC_INDEX_P2P) {
+    elem->active = 0;
+    for (int i = 0; i < c0->numBlocksPerChannel-1; i++){
+      c0->activeBlocksPerChannel[i*NCCL_MAX_OPS + c0Index] = 0;
+    }
+  }
   params->func = ncclKerns[elem->funcIndex];
-  // SCKL number of blocks per channel
-  params->gridDim.x = 6;
   return ncclSuccess;
 }
 
@@ -209,10 +229,20 @@ ncclResult_t ncclBarrierEnqueue(struct ncclComm* comm) {
     NCCLCHECK(ncclCpuBarrierIn(comm, &isLast));
     if (isLast) {
       // I'm the last. Launch all operations.
-      NCCLCHECK(ncclLaunchCooperativeKernelMultiDevice(comm->intraParams, comm->intraCudaDevs, comm->intraRanks, *comm->intraCGMode));
+      NCCLCHECK(ncclLaunchCooperativeKernelMultiDevice(comm->intraParams, comm->intraCudaDevs, comm->intraRanks, *comm->intraCGMode, comm->channels[0].numBlocksPerChannel));
       NCCLCHECK(ncclCpuBarrierLast(comm));
     }
   }
+
+  // cudaDeviceSynchronize();
+  // for (int c=0; c<comm->p2pnChannels; c++) {
+  //   printf("I am here\n");
+  //   struct ncclChannel* channel = comm->channels+c;
+  //   if (channel->workCount) {
+  // //    channel->workFifo[(channel->workFifoTail-1)%NCCL_MAX_OPS].elems[0].active = 0;
+  //   }
+  // }
+
   return ncclSuccess;
 }
 
